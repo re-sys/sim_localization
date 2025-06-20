@@ -1,0 +1,10 @@
+laser_simulator:
+  ros__parameters:
+    court_length: 15.0  # Basketball court length in meters
+    court_width: 7.0    # Basketball court width in meters
+    laser_count: 5      # Number of laser beams
+    update_rate: 10.0   # Update rate in Hz
+laser_localization:
+  ros__parameters:
+    court_length: 15.0  # Basketball court length in meters
+    court_width: 7.0    # Basketball court width in meters
