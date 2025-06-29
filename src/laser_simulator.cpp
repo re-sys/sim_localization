@@ -7,6 +7,8 @@
 #include <cmath>
 #include <random>
 #include <memory>
+#include <optional>
+#include <algorithm>
 
 class LaserSimulator : public rclcpp::Node
 {
@@ -55,8 +57,8 @@ public:
             "cmd_vel", 10, std::bind(&LaserSimulator::cmdVelCallback, this, std::placeholders::_1));
             
         // 创建激光发布
-        laser_pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("laser_scan", 10);
-        fake_laser_pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("laser_scan_fake", 10);
+        laser_pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("laser_scan", rclcpp::QoS(10));
+        fake_laser_pub_ = this->create_publisher<sensor_msgs::msg::LaserScan>("laser_scan_fake", rclcpp::QoS(10));
 
         // 创建动态TF广播器（用于持续更新的变换）
         tf_broadcaster_ = std::make_shared<tf2_ros::TransformBroadcaster>(this);
@@ -90,22 +92,8 @@ private:
         // 发布静态变换（只发布一次）
         static_tf_broadcaster_->sendTransform(transform);
  
-        transform.child_frame_id = "fake_base_link";
-        
-        transform.transform.translation.x = map_x_;
-        transform.transform.translation.y = map_y_;
-   
-        q.setRPY(0, 0, map_theta_);
-        transform.transform.rotation.x = q.x();
-        transform.transform.rotation.y = q.y();
-        transform.transform.rotation.z = q.z();
-        transform.transform.rotation.w = q.w();
-        
-        // 发布静态变换（只发布一次）
-        static_tf_broadcaster_->sendTransform(transform);
-        RCLCPP_INFO(this->get_logger(), "Initial static transform published");
-        RCLCPP_INFO(this->get_logger(), "Initial position: x: %.2f, y: %.2f, theta: %.2f", 
-                   map_x_, map_y_, map_theta_);
+        RCLCPP_INFO(this->get_logger(), "Initial static transform map->odom published");
+        RCLCPP_INFO(this->get_logger(), "Initial position (map frame): x %.2f, y %.2f, theta %.2f", map_x_, map_y_, map_theta_);
     }
     
     void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
@@ -116,34 +104,62 @@ private:
     
     void updateSimulation()
     {
-        // 1. 更新机器人位置 (基于odom坐标系)
-        if (current_cmd_vel_ ) {
-            double dt = 1.0 / update_rate_;
-            
-            // 更新角度
-            odom_theta_ += current_cmd_vel_->angular.z * dt;
-            
-            // 更新位置
-            odom_x_ += current_cmd_vel_->linear.x * cos(odom_theta_) * dt;
-            odom_y_ += current_cmd_vel_->linear.x * sin(odom_theta_) * dt;
-            
-            // 确保在篮球场内（基于map坐标系）
-            map_x_ = std::max(0.0, std::min(court_length_, map_x_ + odom_x_));
-            map_y_ = std::max(0.0, std::min(court_width_, map_y_ + odom_y_));
-            RCLCPP_INFO(this->get_logger(), "Odom position: x: %.2f, y: %.2f, theta: %.2f", 
-                   odom_x_, odom_y_, odom_theta_);
+        // 1. 根据当前速度指令更新机器人在 map 坐标系下的真实位姿
+        if (current_cmd_vel_) {
+            const double dt = 1.0 / update_rate_;
+            const double v  = current_cmd_vel_->linear.x;   // 机器人前向速度 (m/s)
+            const double w  = current_cmd_vel_->angular.z;  // 机器人角速度 (rad/s)
 
+            /*
+             * 先更新角度，再使用新的航向角更新位置。
+             * map 坐标系下的位置直接使用积分得到，而不再叠加累积的 odom 误差，
+             * 这样可以避免随着时间推移出现位置畸变的问题。
+             */
+            map_theta_ += w * dt;
+            // 将角度归一化到 [-pi, pi]
+            map_theta_ = std::atan2(std::sin(map_theta_), std::cos(map_theta_));
+
+            // 积分更新位置
+            map_x_ += v * std::cos(map_theta_) * dt;
+            map_y_ += v * std::sin(map_theta_) * dt;
+
+            // 同步更新 odom 坐标（以初始点为原点）
+            odom_theta_ += w * dt;
+            odom_theta_ = std::atan2(std::sin(odom_theta_), std::cos(odom_theta_));
+            odom_x_ += v * std::cos(odom_theta_) * dt;
+            odom_y_ += v * std::sin(odom_theta_) * dt;
+
+            // 保证机器人始终位于球场范围内
+            map_x_ = std::max(0.0, std::min(court_length_, map_x_));
+            map_y_ = std::max(0.0, std::min(court_width_, map_y_));
+
+            RCLCPP_DEBUG(this->get_logger(), "Map pose   : x %.2f, y %.2f, theta %.2f", map_x_, map_y_, map_theta_);
+            RCLCPP_DEBUG(this->get_logger(), "Odom pose  : x %.2f, y %.2f, theta %.2f", odom_x_, odom_y_, odom_theta_);
         }
-                    // 2. 发布odom->base_link的TF
+
+        // 2. 发布 odom->base_link 的 TF
         publishOdomTransform();
-        
-        // 3. 模拟激光并发布
+        // 2.5 发布 map->fake_base_link 的 TF
+        publishFakeBaseLinkTransform();
+
+        // 3. 生成并发布激光数据（基于 map 坐标系的真实位置）
         auto laser_msg = simulateLaser();
-        laser_pub_->publish(*laser_msg);
-        laser_msg->header.frame_id = "fake_base_link";
-        fake_laser_pub_->publish(*laser_msg);
-        
-        
+
+        // 4. 先发布 fake_base_link 帧的 ground-truth 激光到 laser_scan_fake
+        // RCLCPP_DEBUG(this->get_logger(), "Publish fake scan frame: %s", laser_msg->header.frame_id.c_str());
+        // RCLCPP_INFO(this->get_logger(), "Publish fake scan frame: %s", laser_msg->header.frame_id.c_str());
+        fake_laser_pub_->publish(*laser_msg);  // header.frame_id 保持为 fake_base_link
+
+        // 5. 复制一份数据发布到 laser_scan 话题，frame_id 改为 base_link
+        auto base_scan_msg = *laser_msg;  // 拷贝
+        base_scan_msg.header.frame_id = "base_link";
+        // RCLCPP_DEBUG(this->get_logger(), "Publish base scan frame: %s", base_scan_msg.header.frame_id.c_str());
+        // RCLCPP_INFO(this->get_logger(), "Publish base scan frame: %s", base_scan_msg.header.frame_id.c_str());
+        laser_pub_->publish(base_scan_msg);
+
+        // 话题映射：
+        //   laser_scan (base_link)
+        //   laser_scan_fake (fake_base_link)
     }
     
     void publishOdomTransform()
@@ -170,12 +186,34 @@ private:
         
     }
     
+    void publishFakeBaseLinkTransform()
+    {
+        geometry_msgs::msg::TransformStamped transform;
+
+        transform.header.stamp = this->now();
+        transform.header.frame_id = "map";
+        transform.child_frame_id = "fake_base_link";
+
+        transform.transform.translation.x = map_x_;
+        transform.transform.translation.y = map_y_;
+        transform.transform.translation.z = 0.0;
+
+        tf2::Quaternion q;
+        q.setRPY(0, 0, map_theta_);
+        transform.transform.rotation.x = q.x();
+        transform.transform.rotation.y = q.y();
+        transform.transform.rotation.z = q.z();
+        transform.transform.rotation.w = q.w();
+
+        tf_broadcaster_->sendTransform(transform);
+    }
+    
     std::shared_ptr<sensor_msgs::msg::LaserScan> simulateLaser()
     {
         auto laser_msg = std::make_shared<sensor_msgs::msg::LaserScan>();
         
         laser_msg->header.stamp = this->now();
-        laser_msg->header.frame_id = "base_link";
+        laser_msg->header.frame_id = "fake_base_link";
         
         // 激光参数设置
         laser_msg->angle_min = 0.0;

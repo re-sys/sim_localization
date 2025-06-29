@@ -10,6 +10,7 @@ from enum import Enum
 from scipy.optimize import fsolve
 
 
+
 class CourtBoundary(Enum):
     LEFT = 0     # x=0
     RIGHT = 1    # x=court_length
@@ -152,35 +153,41 @@ class LaserLocalization(Node):
                 continue
          # 1. Estimate yaw using TOP and BOTTOM measurements
     def update_estimated_position(self):
-                # Update position estimate if we have valid measurements
+        # Update position estimate if we have valid measurements
         if self.estimated_x_arr and self.estimated_y_arr:
-            # Check if values are close to each other before averaging
+            # 添加用户选择机制
             if len(self.estimated_x_arr) > 1:
                 x_std = np.std(self.estimated_x_arr)
-                if x_std > 0.5:  # Threshold for x values
-                    self.get_logger().error(f'X values too different: {self.estimated_x_arr}')
-                    self.estimated_x_arr.clear()
-                    return False
+                if x_std > 0.05:  # Threshold for x values
+                    self.get_logger().warn(f'X values too different: {self.estimated_x_arr}')
+                    # 随机选择一个值
+                    selected_x = np.random.choice(self.estimated_x_arr)
+                    self.get_logger().info(f'Using randomly selected x: {selected_x:.2f}')
+                    self.estimated_x = max(0., min(self.court_length, selected_x))
                 else:
-                    self.get_logger().info(f'X values too different: {self.estimated_x_arr}')
+                    avg_x = sum(self.estimated_x_arr) / len(self.estimated_x_arr)
+                    self.estimated_x = max(0., min(self.court_length, avg_x))
+            else:
+                self.estimated_x = self.estimated_x_arr[0]
+            
             if len(self.estimated_y_arr) > 1:
                 y_std = np.std(self.estimated_y_arr)
-                if y_std > 0.5:  # Threshold for y values
-                    self.get_logger().error(f'Y values too different: {self.estimated_y_arr}')
-                    self.estimated_y_arr.clear()
-                    return False
-                    
-            avg_x = sum(self.estimated_x_arr) / len(self.estimated_x_arr)
-            avg_y = sum(self.estimated_y_arr) / len(self.estimated_y_arr)
-            self.get_logger().info(f'self.x_arr:{self.estimated_x_arr}\n'
-                                   f'self.y_arr:{self.estimated_y_arr}\n')
+                if y_std > 0.05:  # Threshold for y values
+                    self.get_logger().warn(f'Y values too different: {self.estimated_y_arr}')
+                    # 随机选择一个值
+                    selected_y = np.random.choice(self.estimated_y_arr)
+                    self.get_logger().info(f'Using randomly selected y: {selected_y:.2f}')
+                    self.estimated_y = max(0., min(self.court_width, selected_y))
+                else:
+                    avg_y = sum(self.estimated_y_arr) / len(self.estimated_y_arr)
+                    self.estimated_y = max(0., min(self.court_width, avg_y))
+            else:
+                self.estimated_y = self.estimated_y_arr[0]
             
             self.estimated_y_arr.clear()
             self.estimated_x_arr.clear()
-            # Constrain to court dimensions
-            self.estimated_x = max(0., min(self.court_length, avg_x))
-            self.estimated_y = max(0., min(self.court_width, avg_y))
             return True
+        return False
     def scan_callback(self, msg):
         """Process laser scan data to estimate position"""
         if not self.initial_pose_received:

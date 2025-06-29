@@ -16,6 +16,8 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 ament_python_install_package(${PROJECT_NAME})
 
@@ -28,12 +30,51 @@ ament_target_dependencies(
   "tf2_ros"
   "visualization_msgs"
 )
+
+add_executable(scan_listener src/scan_listener.cpp)
+ament_target_dependencies(
+  scan_listener
+  "rclcpp"
+  "sensor_msgs"
+  "geometry_msgs"
+  "tf2"
+  "tf2_ros"
+  "tf2_geometry_msgs"
+)
+
+# Sensor data to LaserScan converter
+add_executable(sensor_data_to_scan src/sensor_data_to_scan.cpp)
+ament_target_dependencies(
+  sensor_data_to_scan
+  "rclcpp"
+  "std_msgs"
+  "sensor_msgs"
+  "geometry_msgs"
+  "tf2"
+  "tf2_ros"
+  "tf2_geometry_msgs"
+)
+
+# Fake laser generator node
+add_executable(fake_laser_generator src/fake_laser_generator.cpp)
+ament_target_dependencies(
+  fake_laser_generator
+  "rclcpp"
+  "std_msgs"
+  "geometry_msgs"
+  "tf2"
+  "tf2_ros"
+)
+
 install(
   DIRECTORY include
   DESTINATION include
 )
 install(TARGETS
   laser_simulator
+  scan_listener
+  sensor_data_to_scan
+  fake_laser_generator
   DESTINATION lib/${PROJECT_NAME}
 )
 install(
